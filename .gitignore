@@ -1,0 +1,6 @@
+﻿work/
+data/
+output/
+__pycache__/
+*.parquet
+*.zip
