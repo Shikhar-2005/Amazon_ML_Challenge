@@ -1,109 +1,114 @@
-# Business Entity Resolution — Neural Nomads
+# Business Entity Resolution Pipeline
 
-Links every Source-1 business to its duplicates in Source-2 and Source-3.
-The pipeline is: normalization → weighted multi-key blocking → LightGBM pair classifier →
-one-to-one decision layer. The full method is in `Documentation_template.md` at the root of the
-submission.
+An end-to-end Machine Learning pipeline for large-scale record linkage and duplicate business entity resolution. The system matches entity records across multiple disparate data sources (Source 1 to Source 2 and Source 3) using multi-key blocking, pairwise similarity features, and a tuned LightGBM classifier with one-to-one constraint optimization.
 
-## 1. Environment
+The complete methodology, algorithmic choices, and evaluation metrics are documented in [Documentation_template.md](Documentation_template.md).
 
-- Python 3.10 or newer (developed and tested on Python 3.14, Windows 11)
-- About 16 GB RAM and 20 GB free disk for intermediate files. Runs on CPU only; no GPU and no
-  network access needed.
+---
+
+## 1. System Requirements & Environment
+
+- **Python:** 3.10 or newer (tested on Python 3.11 / 3.14 on Windows and Linux)
+- **Hardware:** ~16 GB RAM and ~20 GB free disk space for intermediate Parquet files.
+- **Compute:** CPU-only (multithreaded using Polars, NumPy, and LightGBM). No GPU or internet connection required.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 2. Data layout
+---
 
-Put the challenge files in one folder and point `ER_DATA` at it:
+## 2. Data Layout
 
-```
-<ER_DATA>/
+Place the source datasets in a folder (default: `./data`) or configure the path via the `ER_DATA` environment variable:
+
+```text
+data/
 ├── train_source1.tsv   train_source2.tsv   train_source3.tsv
 ├── train_ground_truth.tsv
 └── test_source1.tsv    test_source2.tsv    test_source3.tsv
 ```
 
-By default `ER_DATA` is `<submission root>/data`. The other paths are set through environment
-variables as well (see `src/config.py`):
+### Environment Variables & Settings
 
-| Variable | Meaning | Default |
+All paths and hyperparameters can be overridden via environment variables (defined in `src/config.py`):
+
+| Variable | Description | Default |
 |---|---|---|
-| `ER_DATA` | folder with the raw TSVs | `<root>/data` |
-| `ER_WORK` | scratch folder for Parquet intermediates, candidates, features and the model | `business_entity_resolution/work` |
-| `ER_OUT` | where the two output files are written | `<root>/output` |
-| `ER_MAXDF` | blocking: ignore keys shared by more than this many target records | `400` |
-| `ER_K` | blocking: candidates kept per S1 record per source | `10` |
-| `ER_FIT_FRAC`, `ER_HO_FRAC` | share of training S1 entities used to fit / to tune the threshold | `0.15`, `0.10` |
+| `ER_DATA` | Folder containing raw input TSVs | `./data` |
+| `ER_WORK` | Scratch folder for intermediate Parquet files & cache | `./work` |
+| `ER_OUT` | Directory where output TSVs are generated | `./output` |
+| `ER_MAXDF` | Max document frequency threshold for blocking keys | `400` |
+| `ER_K` | Number of candidate pairs retained per entity per source | `10` |
+| `ER_FIT_FRAC` | Proportion of entities used for model training | `0.15` |
+| `ER_HO_FRAC` | Proportion of entities used for held-out validation / tuning | `0.10` |
 
-The defaults are exactly the settings used for the submitted results. `ER_MAXDF` and `ER_K`
-must be the same for training and test.
+---
 
-## 3. Reproduce end to end (data → blocking → matching → output)
+## 3. Pipeline Execution
+
+Navigate to the `src/` directory:
 
 ```bash
-cd code/business_entity_resolution/src
-export ER_DATA=/path/to/dataset          # Windows PowerShell: $env:ER_DATA="C:\path\to\dataset"
+cd src
+```
+
+### Option A: Full Pipeline (Data Prep -> Blocking -> Features -> Training -> Prediction)
+
+```bash
+# Optional: point to custom data folder
+# Windows PowerShell: $env:ER_DATA="C:\path\to\data"
+# Linux/macOS:        export ER_DATA="/path/to/data"
+
 python run_all.py
 ```
 
-`run_all.py` runs the stages below in order. Each stage skips work whose output already exists
-in `ER_WORK`, so an interrupted run can simply be restarted.
+`run_all.py` executes each stage sequentially and caches intermediate results to `./work/`:
 
-| # | Command | What it does | Output (in `ER_WORK` unless noted) |
-|---|---|---|---|
-| 1 | `python prep.py train test` | read TSVs, split by country, transliterate, clean names/addresses, build skeletons and blocking keys | `<split>_s<k>_<country>.parquet` |
-| 2 | `python block.py train` / `python block.py test` | IDF-weighted inverted-index blocking, top-K per S1 per source | `cands_<split>_<country>.parquet` |
-| 3 | `python eval_block.py` | blocking recall on the training labels (overall and for non-ASCII names) | printed report |
-| 4 | `python features.py train` / `python features.py test` | 30 pairwise similarity features + blocking ranks | `feat_<split>_<country>/part_*.parquet` |
-| 5 | `python train.py` | group features, LightGBM training, threshold + one-to-one tuning on held-out S1 entities | `lgb_model.txt`, `best_params.json`, `holdout_preds.parquet` |
-| 6 | `python predict.py` | score test candidates, apply decision rule, write results | `ER_OUT/matching_results.tsv`, `ER_OUT/candidate_pairs.tsv` |
+| Stage | Script | Purpose |
+|---|---|---|
+| 1 | `prep.py` | Text normalization, address cleaning, unidecode transliteration, and blocking key generation. |
+| 2 | `block.py` | Inverted-index candidate generation with IDF weighting (top-K per source). |
+| 3 | `eval_block.py` | Evaluates candidate recall against ground truth labels (including transliterated records). |
+| 4 | `features.py` | Extracts 40+ pairwise text, token, and rank competition features. |
+| 5 | `train.py` | Trains LightGBM model and tunes macro F0.5 decision thresholds on validation splits. |
+| 6 | `predict.py` | Scores test candidate pairs, applies 1-to-1 decision rules, and exports final TSV files. |
 
-Typical runtime on a 12-core laptop is about 70 minutes for everything.
+### Option B: Fast Inference Only (Using Pretrained Model)
 
-### Prediction only (with the shipped model)
-
-`models/lgb_model.txt` and `models/best_params.json` are the exact model and decision rule behind
-the submitted `matching_results.tsv`. To regenerate the outputs from the test TSVs alone:
+To run inference directly on the test set using the pretrained model weights in `models/`:
 
 ```bash
 python run_all.py --predict
 ```
 
-`predict.py` uses a model in `ER_WORK` if `train.py` has produced one. Otherwise it falls back to
-`models/`.
+---
 
-## 4. Outputs
+## 4. Output Files
 
-- `matching_results.tsv`: `source1_entity_id <TAB> matched_entity_ids` with one row per test S1
-  entity. The ids are comma-separated; an empty value means no match.
-- `candidate_pairs.tsv`: `source1_entity_id <TAB> candidate_entity_ids`. This is the full
-  blocking output that was fed to the model (up to 10 S2 + 10 S3 candidates per S1 entity).
-  `matching_results.tsv` is always a subset of it.
+Inference results are saved to the `output/` directory:
+- `matching_results.tsv`: `source1_entity_id <TAB> matched_entity_ids` (comma-separated list of identified duplicates).
+- `candidate_pairs.tsv`: `source1_entity_id <TAB> candidate_entity_ids` (all candidate pairs considered by the model).
 
-Both files pass the organisers' `validate_submission.py`.
+---
 
-## 5. Determinism
+## 5. Repository Structure
 
-The entity splits use fixed hashes, key hashing is seeded, and LightGBM uses seed 42. The submitted
-`output/` files were generated by `python run_all.py --predict` with the shipped model, so re-running
-that command on the same TSVs reproduces them. Blocking keeps the top-K candidates by score, and ties
-are broken by input row order, so reading the records in a different order can change a few percent
-of rows. LightGBM training is multithreaded, so a retrained model can differ slightly.
-
-## 6. Code map
-
-| File | Role |
-|---|---|
-| `src/config.py` | paths and settings |
-| `src/run_all.py` | orchestrates all stages |
-| `src/prep.py` | normalization, transliteration (`unidecode`), consonant skeletons, blocking keys |
-| `src/block.py` | candidate generation |
-| `src/eval_block.py` | blocking recall report |
-| `src/features.py` | pair features (`rapidfuzz.process.cpdist`, all cores) |
-| `src/train.py` | model training, validation split, decision-rule tuning, macro F0.5 metric |
-| `src/predict.py` | inference and output writing |
-
-No external data, APIs or pretrained models are used.
+```text
+├── .gitignore
+├── requirements.txt         # Project dependencies
+├── README.md                # Project overview and run guide
+├── Documentation_template.md# In-depth architectural & algorithmic documentation
+├── models/
+│   ├── best_params.json     # Tuned decision thresholds & metrics
+│   └── lgb_model.txt        # Pretrained LightGBM model
+└── src/
+    ├── config.py            # Global paths, parameters, and directories
+    ├── prep.py              # Data preprocessing & transliteration
+    ├── block.py             # Inverted-index candidate blocking
+    ├── eval_block.py        # Recall@K evaluation
+    ├── features.py          # Similarity & competition feature extraction
+    ├── train.py             # LightGBM training & threshold optimizer
+    ├── predict.py           # Model scoring & TSV generation
+    └── run_all.py           # Pipeline runner
+```
