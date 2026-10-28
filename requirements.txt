@@ -1,0 +1,6 @@
+polars==1.44.2
+pyarrow==25.0.1
+numpy==2.4.4
+rapidfuzz==3.14.6
+Unidecode==1.4.0
+lightgbm==4.7.0
